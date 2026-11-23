@@ -241,6 +241,42 @@ task.spawn(function()
         WindUI:Notify({Title = "模式", Content = v .. "(下次投票時生效)", Duration = 3})
       end,
     })
+    -- game speed (the x1 / x1.5 / x2 buttons at the bottom right): only used if the user picks one here
+    local speedValues = {"不改變", "x1", "x1.5", "x2"}
+    local function speedTarget(v) return ({["x1"] = 1, ["x1.5"] = 1.5, ["x2"] = 2})[v] end
+    local function applySpeed(v, notify)
+      local target = speedTarget(v)
+      if not target or game.PlaceId ~= MATCH then return end
+      if workspace:GetAttribute("GameSpeed") == target then return end
+      local ok, res = pcall(function() return RF.ChangeSpeed:InvokeServer(target) end)
+      report(("SPEED x%s -> %s"):format(tostring(target), ok and tostring(res) or ("error " .. tostring(res))))
+      if notify then
+        WindUI:Notify({Title = "遊戲速度", Content = (ok and res) and ("x" .. tostring(target)) or "伺服器沒有接受(可能需要通行證)", Duration = 3})
+      end
+    end
+    Tab:Dropdown({
+      Title = "遊戲速度 Speed", Desc = "右下角 x1 / x1.5 / x2。「不改變」= 腳本完全不動速度;選了才會在比賽中套用",
+      Values = speedValues, Value = (table.find(speedValues, settings.speed) and settings.speed) or "不改變",
+      Callback = function(v)
+        if not ready then return end
+        if type(v) == "table" then v = v[1] end
+        if type(v) ~= "string" or v == "" then return end
+        settings.speed = v
+        saveSettings()
+        applySpeed(v, true)
+      end,
+    })
+    task.spawn(function() -- every match is a new server: re-apply the chosen speed there (3 tries, then give up)
+      local tries = 0
+      while alive() do
+        task.wait(5)
+        local want = speedTarget(settings.speed)
+        if want and game.PlaceId == MATCH and workspace:GetAttribute("GameSpeed") ~= want and tries < 3 then
+          tries += 1
+          applySpeed(settings.speed)
+        end
+      end
+    end)
     local HelpTab = Window:Tab({Title = "說明", Icon = "info"})
     HelpTab:Paragraph({Title = "設定分頁", Desc = "地圖:下次在大廳選哪一台電梯。\n模式:下次投票用哪個模式。\n這一局不會變,下次進大廳或投票時才生效,選擇會存檔。"})
     HelpTab:Paragraph({Title = "放置單位分頁", Desc = "即時列出場上每座塔(輸出 / 農場 / 解暈)的等級和座標,下面是最近的放置和賣出紀錄。"})
