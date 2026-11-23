@@ -13,7 +13,7 @@
 
 local DRY = getgenv().CMTD_DRY -- dry run: plan only, send nothing, do not replace a running instance
 local AUTO_LOAD = true          -- true: reload this script from GitHub after every teleport (lobby <-> match). false: manual start only
-local SELF = getgenv().CMTD_FILE or "https://raw.githubusercontent.com/kbisnyu-cpu/sbiki/main/cmtd_auto.lua"
+local SELF = getgenv().CMTD_FILE or "https://raw.githubusercontent.com/kkbisnyu-sys/ssss/main/cmtd_auto.lua"
 local VIA_QUEUE = getgenv().CMTD_FILE ~= nil -- set only by the teleport loader below
 getgenv().CMTD_FILE = nil
 if VIA_QUEUE and not AUTO_LOAD then print("[CMTD] auto-load is off: started by an old teleport loader, exiting") return end
