@@ -35,7 +35,8 @@ local CFG = {
   pathMargin   = 2.2,              -- keep tower centre this far outside a path tile (only when allowOnPath=false)
   minGap       = 4.3,              -- tower hitbox is 4x4; centres closer than this overlap
   clusterRadius = 9,               -- units of one kind are placed within this many studs of the first one (one Repair Drone covers them all)
-  stack        = false,            -- false: spread to the stretches that lack damage; true: pile the damage on the best spots
+  stack        = true,             -- false: spread to the stretches that lack damage; true: pile the damage together on the best spots
+  stackKeep    = 0.85,             -- stack mode: a spot must keep this share of the best free spot's full value (range stays effective); among those the one nearest to the existing damage cluster wins
   spreadGap    = 8,                -- attack towers prefer to stand at least this far apart (good spots first)
   goodShare    = 0.35,             -- a spread spot is 'good' while its NEW damage is at least this share of the best spot's full value; below that: cluster
   reachFloor   = 1,                -- weight of a path stretch nobody reached lately; 1 = off: every enemy must walk through, so all path counts the same (max coverage x dps)
@@ -1297,8 +1298,8 @@ local function bestSpot(u, opening, reachNow)
   local bu, buC, cs, cC = 0, nil, 0, nil
   for ci, c in ipairs(cands) do
     if freeAtk(c) and not ((opening or reachNow) and val(u, 1, c) <= 0) then
-      okc[ci] = true
       local su = score(c, true)
+      okc[ci] = su -- (a number is truthy; stack mode reuses the score)
       if su > bu then bu, buC = su, c end
       if clusterAnchor and su > cs and (c[1] - clusterAnchor.x) ^ 2 + (c[2] - clusterAnchor.z) ^ 2 <= rad2 then cs, cC = su, c end
     end
@@ -1306,7 +1307,7 @@ local function bestSpot(u, opening, reachNow)
   end
   -- pass B: spread = the most NEW damage (discounted by what already stands there), >= spreadGap from my other attack towers
   local best, bs, gapUsed = nil, 0, 0
-  for pass = 1, 2 do
+  for pass = 1, CFG.stack and 0 or 2 do
     local gap2 = (pass == 1 and CFG.spreadGap or 0) ^ 2
     for ci, c in ipairs(cands) do
       if okc[ci] then
@@ -1324,7 +1325,24 @@ local function bestSpot(u, opening, reachNow)
     if best then break end
   end
   local mode, chosen, curS = "spread", best, bs
-  if not best or bs < CFG.goodShare * bu then
+  if CFG.stack then
+    -- stack: every attack tower goes next to the damage cluster, but only on a spot that keeps stackKeep of the best
+    -- free spot's full value (full = no discount for damage already standing there) -> the range stays effective
+    mode, chosen, curS, gapUsed = "stack", buC, bu, 0
+    if buC and #mine > 0 then
+      local ax, az = 0, 0
+      for _, t in ipairs(mine) do ax += t.x az += t.z end
+      ax, az = ax / #mine, az / #mine
+      local bd = math.huge
+      for ci, c in ipairs(cands) do
+        local su = okc[ci]
+        if su and su >= CFG.stackKeep * bu then
+          local d = (c[1] - ax) ^ 2 + (c[2] - az) ^ 2
+          if d < bd then bd, chosen, curS = d, c, su end
+        end
+      end
+    end
+  elseif not best or bs < CFG.goodShare * bu then
     -- no good spread spot left: pile onto the best spot (next to the anchor if there is one)
     mode, chosen, curS, gapUsed = "cluster", cC or buC, cC and cs or bu, 0
   end
@@ -1337,7 +1355,7 @@ local function bestSpot(u, opening, reachNow)
     local x0, z0 = chosen[1], chosen[2]
     local ax0, ax1 = area.Position.X - area.Size.X / 2 + 2, area.Position.X + area.Size.X / 2 - 2
     local az0, az1 = area.Position.Z - area.Size.Z / 2 + 2, area.Position.Z + area.Size.Z / 2 - 2
-    local undisc = mode == "cluster"
+    local undisc = mode == "cluster" or mode == "stack"
     for dx = -0.75, 0.75, 0.25 do
       for dz = -0.75, 0.75, 0.25 do
         local x, z = x0 + dx, z0 + dz
@@ -1521,11 +1539,18 @@ end
 
 -- every unit that may be placed stands (farms up to maxFarms, medics only with a stun threat), or the cap is reached
 local medicReserve -- defined below (slots kept for the Repair Drones)
+local relaxReserve = false -- latch: slots stayed empty although money was idle -> stop keeping slots free for farms / medics
+-- a farm only deserves a slot while its first level still pays back before the last wave
+local function farmWorth(u)
+  local L1 = u.levels[1]
+  return L1.cash * wavesLeft() >= L1.price * CFG.farmPayback
+end
 local function slotsFilled()
   if count() + medicReserve() >= CFG.maxUnits then return true end
   local farmCap, farms = 0, 0
   for _, u in ipairs(slotUnits) do
-    if u.kind == "farm" then farmCap += u.limit
+    if u.kind == "farm" then
+      if farmWorth(u) then farmCap += u.limit end
     elseif u.id and placedOf(u.name) < u.limit and (u.kind == "attack" or (u.kind == "medic" and stunThreat())) then return false end
   end
   for _, t in pairs(T) do if kindOf(t) == "farm" then farms += 1 end end
@@ -1555,7 +1580,7 @@ end
 local reservedFarmSlotsBase
 -- slots kept free for the medic units (Repair Drone) while a stunning enemy is still to come in the wave table
 medicReserve = function()
-  if not waves then return 0 end
+  if relaxReserve or not waves then return 0 end
   local threat = stunSeen
   if not threat then
     for w = math.max(1, curWave), totalWaves do
@@ -1575,9 +1600,10 @@ medicReserve = function()
 end
 local function reservedFarmSlots() return reservedFarmSlotsBase() + medicReserve() end
 reservedFarmSlotsBase = function()
-  if not CFG.useFarms or phase() == "late" or liquidate then return 0 end
+  if relaxReserve or not CFG.useFarms or phase() == "late" or liquidate then return 0 end
   local cap, farms = 0, 0
-  for _, u in ipairs(slotUnits) do if u.kind == "farm" then cap += math.min(u.limit, CFG.maxFarms) end end
+  -- only farms that still pay back are worth a kept-free slot (a farm that is no longer bought must not block an attack tower)
+  for _, u in ipairs(slotUnits) do if u.kind == "farm" and farmWorth(u) then cap += math.min(u.limit, CFG.maxFarms) end end
   for _, t in pairs(T) do if kindOf(t) == "farm" then farms += 1 end end
   return math.max(0, math.min(cap, CFG.maxFarms) - farms)
 end
@@ -1990,12 +2016,14 @@ requestSnapshot(true) -- adopt towers that already stand (reload mid-match)
 local lastVote, firedAgain, lastState, lastWave, lastWait, ended = 0, false, nil, curWave, 0, false
 local lastPhase, lastPress
 local lastErrAt = 0
+local idleSince = nil
 while alive() do
   local okLoop, errLoop = pcall(function()
   local gs = workspace:GetAttribute("GameState")
   if gs ~= lastState then log("GameState", gs, "wave", workspace:GetAttribute("Wave"), "msg", workspace:GetAttribute("Message")) lastState = gs end
   local result = roundResult(gs)
   if gs == "Voting" then
+    relaxReserve, idleSince = false, nil -- a new match: reserves apply again
     if os.clock() - lastVote > 3 and not voteOk() then
       RE.ModeVote:FireServer(CFG.mode)
       lastVote = os.clock()
@@ -2102,8 +2130,24 @@ while alive() do
         for _, a in ipairs(acts) do
           if a.kind == "up" or (filling and a.kind == "new" and a.u.kind == "attack") then
             best = best or a
-            if a.cost <= m and a.ratio >= best.ratio * CFG.altRatio then run(a) break end
+            if a.cost <= m and a.ratio >= best.ratio * CFG.altRatio then acted = run(a) ~= false break end
           end
+        end
+      end
+      -- safety valve: slots stay empty and nothing is bought or saved for (money idle) for 10 s -> a reserve (farm /
+      -- medic slots) or a unit limit is the cause. Release the reserves for the rest of the match and say why.
+      if acted or want then
+        idleSince = nil
+      else
+        idleSince = idleSince or os.clock()
+        if not relaxReserve and count() < CFG.maxUnits and os.clock() - idleSince > 10 then
+          local lim = {}
+          for _, u in ipairs(slotUnits) do
+            lim[#lim+1] = ("%s[%s] %d/%s"):format(u.name, u.kind, placedOf(u.name), u.limit == math.huge and "-" or tostring(u.limit))
+          end
+          report(("SLOTS STUCK at wave %s: towers %d/%d, money %d, kept for farms %d, for medics %d | %s -> reserves released"):format(
+            tostring(curWave), count(), CFG.maxUnits, m, reservedFarmSlotsBase(), medicReserve(), table.concat(lim, ", ")))
+          relaxReserve = true
         end
       end
     end
